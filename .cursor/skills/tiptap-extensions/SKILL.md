@@ -439,6 +439,323 @@ wrappingInputRule({ find: /^>\s$/, type: this.type })           // wrap in node
 
 ---
 
+## Extension Management — File Structure & Registration
+
+### Recommended folder layout
+
+```
+src/
+└── extensions/
+    ├── index.ts            ← barrel — export everything here
+    ├── kit.ts              ← your project's StarterKit replacement
+    │
+    ├── callout/
+    │   ├── Callout.ts      ← Node/Mark/Extension definition
+    │   ├── CalloutView.tsx ← React NodeView component (if needed)
+    │   └── callout.css     ← scoped styles (if not using Tailwind)
+    │
+    ├── slash-command/
+    │   ├── SlashCommand.ts
+    │   ├── SlashList.tsx
+    │   └── commands.ts
+    │
+    └── my-mark/
+        └── MyMark.ts
+```
+
+**Rules:**
+- One extension per folder. Keep the Node/Mark/Extension class and its NodeView component co-located.
+- Never import a NodeView component outside its extension folder — only the extension itself knows its renderer.
+- Export everything from `extensions/index.ts` so consumers have a single import point.
+
+### Barrel export (`extensions/index.ts`)
+
+```ts
+// extensions/index.ts
+export { Callout } from './callout/Callout'
+export type { CalloutOptions } from './callout/Callout'
+
+export { MyMark } from './my-mark/MyMark'
+export type { MyMarkOptions } from './my-mark/MyMark'
+
+export { SlashCommand } from './slash-command/SlashCommand'
+
+// Re-export the kit for one-line editor setup
+export { EditorKit } from './kit'
+```
+
+### The Kit pattern — bundle extensions into one
+
+Create a single `EditorKit` extension that bundles all your project extensions. This is the same pattern as `StarterKit`.
+
+```ts
+// extensions/kit.ts
+import { Extension } from '@tiptap/core'
+import StarterKit from '@tiptap/starter-kit'
+import { Highlight } from '@tiptap/extension-highlight'
+import { Underline } from '@tiptap/extension-underline'
+import { TextAlign } from '@tiptap/extension-text-align'
+import { Link } from '@tiptap/extension-link'
+import { Callout } from './callout/Callout'
+import { MyMark } from './my-mark/MyMark'
+import { SlashCommand } from './slash-command/SlashCommand'
+
+export interface EditorKitOptions {
+  // Expose per-extension options — false = disable that extension
+  callout?: Partial<CalloutOptions> | false
+  myMark?: Partial<MyMarkOptions> | false
+  slashCommand?: boolean
+  // Pass-through to StarterKit
+  heading?: { levels: (1 | 2 | 3 | 4 | 5 | 6)[] } | false
+}
+
+export const EditorKit = Extension.create<EditorKitOptions>({
+  name: 'editorKit',
+
+  addOptions() {
+    return {
+      callout: {},
+      myMark: {},
+      slashCommand: true,
+      heading: { levels: [1, 2, 3] },
+    }
+  },
+
+  addExtensions() {
+    const ext = []
+
+    // StarterKit (always included)
+    ext.push(StarterKit.configure({
+      heading: this.options.heading === false ? false : this.options.heading,
+      history: true,
+    }))
+
+    // Common formatting
+    ext.push(Highlight.configure({ multicolor: true }))
+    ext.push(Underline)
+    ext.push(TextAlign.configure({ types: ['heading', 'paragraph'] }))
+    ext.push(Link.configure({ openOnClick: false }))
+
+    // Project-specific — only add if not disabled
+    if (this.options.callout !== false) {
+      ext.push(Callout.configure(this.options.callout ?? {}))
+    }
+    if (this.options.myMark !== false) {
+      ext.push(MyMark.configure(this.options.myMark ?? {}))
+    }
+    if (this.options.slashCommand) {
+      ext.push(SlashCommand)
+    }
+
+    return ext
+  },
+})
+```
+
+**Usage — one line to set up the entire editor:**
+
+```ts
+import { EditorKit } from '@/extensions'
+
+const editor = useEditor({
+  extensions: [
+    EditorKit.configure({
+      callout: { HTMLAttributes: { class: 'rounded-xl' } },
+      myMark: false,      // disable for this editor instance
+      heading: { levels: [1, 2] },
+    }),
+  ],
+})
+```
+
+---
+
+## Registration — Extension Order & Priority
+
+### Order in the `extensions` array matters for:
+- **Input rules** — first match wins; put specific rules before general ones
+- **Keyboard shortcuts** — same key in two extensions: higher `priority` wins
+- **Schema** — order affects how ProseMirror resolves ambiguous content
+
+### Priority system
+
+```ts
+// Default priority is 100. Higher = evaluated first.
+export const MyMark = Mark.create({
+  name: 'myMark',
+  priority: 200,  // runs before default-priority extensions
+})
+
+// Override priority when extending:
+const HighPriorityBold = Bold.extend({ priority: 150 })
+```
+
+### Recommended registration order
+
+```ts
+extensions: [
+  // 1. Document structure (highest priority — StarterKit handles this)
+  StarterKit,
+
+  // 2. Custom block nodes
+  Callout,
+  MyEmbed,
+
+  // 3. Custom marks
+  MyMark,
+
+  // 4. Behavior extensions (no schema)
+  SlashCommand,
+  MyBehavior,
+
+  // 5. UI helpers (lowest priority — attach last)
+  BubbleMenu,
+  FloatingMenu,
+]
+```
+
+### Disabling a StarterKit extension to replace it
+
+```ts
+StarterKit.configure({
+  // Set to false to remove; provide your custom version separately
+  bold: false,
+  codeBlock: false,
+}),
+// Then add your custom versions:
+CustomBold,
+CodeBlockLowlight.configure({ lowlight }),
+```
+
+---
+
+## Passing Options from Outside the Extension
+
+Extensions receive options at `configure()` time. For **runtime changes** (e.g. toggling a feature based on user auth), use `addStorage` + direct mutation:
+
+```ts
+// Configure at init time:
+editor = useEditor({
+  extensions: [
+    MyExtension.configure({ featureEnabled: false }),
+  ],
+})
+
+// Change at runtime — direct storage mutation:
+editor.storage.myExtension.featureEnabled = true
+
+// Or re-create the editor (heavier but cleaner for large option changes):
+editor.destroy()
+editor = createEditor({ ...newOptions })
+```
+
+### Expose a typed storage interface
+
+```ts
+export interface MyExtensionStorage {
+  featureEnabled: boolean
+  lastAction: string | null
+}
+
+export const MyExtension = Extension.create<MyExtensionOptions, MyExtensionStorage>({
+  addStorage(): MyExtensionStorage {
+    return { featureEnabled: false, lastAction: null }
+  },
+})
+
+// Consumer gets fully typed access:
+const enabled: boolean = editor.storage.myExtension.featureEnabled
+```
+
+---
+
+## Testing Custom Extensions
+
+### Unit test setup (Vitest / Jest)
+
+```bash
+npm install -D @tiptap/core @tiptap/pm jsdom vitest
+```
+
+```ts
+// extensions/callout/__tests__/Callout.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { Editor } from '@tiptap/core'
+import StarterKit from '@tiptap/starter-kit'
+import { Callout } from '../Callout'
+
+function createEditor(content = '<p>Hello</p>') {
+  return new Editor({
+    extensions: [StarterKit, Callout],
+    content,
+    element: document.createElement('div'),
+  })
+}
+
+describe('Callout extension', () => {
+  let editor: Editor
+
+  beforeEach(() => {
+    editor = createEditor()
+  })
+
+  it('setCallout wraps the current block', () => {
+    editor.commands.setCallout({ type: 'info' })
+    expect(editor.isActive('callout')).toBe(true)
+    expect(editor.getAttributes('callout').type).toBe('info')
+  })
+
+  it('unsetCallout lifts the callout', () => {
+    editor.commands.setCallout()
+    editor.commands.unsetCallout()
+    expect(editor.isActive('callout')).toBe(false)
+  })
+
+  it('serializes to correct HTML', () => {
+    editor.commands.setCallout({ type: 'warning' })
+    const html = editor.getHTML()
+    expect(html).toContain('data-callout')
+    expect(html).toContain('data-callout-type="warning"')
+  })
+
+  it('parses from HTML', () => {
+    editor.commands.setContent('<div data-callout data-callout-type="error"><p>text</p></div>')
+    expect(editor.isActive('callout')).toBe(true)
+    expect(editor.getAttributes('callout').type).toBe('error')
+  })
+
+  afterEach(() => editor.destroy())
+})
+```
+
+### vitest.config.ts for TipTap
+
+```ts
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    environment: 'jsdom',       // TipTap needs a DOM
+    globals: true,
+    setupFiles: ['./test-setup.ts'],
+  },
+})
+```
+
+```ts
+// test-setup.ts
+import { vi } from 'vitest'
+
+// TipTap uses ResizeObserver — polyfill for jsdom
+global.ResizeObserver = vi.fn().mockImplementation(() => ({
+  observe: vi.fn(),
+  unobserve: vi.fn(),
+  disconnect: vi.fn(),
+}))
+```
+
+---
+
 ## Common Mistakes & Fixes
 
 | Mistake | Fix |
